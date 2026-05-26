@@ -1,10 +1,12 @@
 // ==UserScript==
 // @name         Auto Play
 // @namespace    http://tampermonkey.net/
-// @version      7.3
-// @description  Automatically moves to the next YouTube Short with a Shadow DOM settings UI.
+// @version      7.4
+// @description  Automatically moves to the next YouTube Short with Shadow DOM settings UI.
 // @author       Mr_Pryor
 // @license      MIT
+// @homepageURL  https://github.com/MrPryor/auto-play
+// @supportURL   https://github.com/MrPryor/auto-play/issues
 // @match        https://www.youtube.com/shorts/*
 // @match        https://youtube.com/shorts/*
 // @grant        GM_getValue
@@ -15,22 +17,23 @@
 (function () {
     'use strict';
 
-    const SCRIPT_VERSION = '7.3';
+    const SCRIPT_VERSION = '7.4';
     const SCRIPT_NAME = 'Auto Play';
     const DONATE_URL = 'https://www.paypal.com/donate/?hosted_button_id=552NJP5ZMFYEL';
+    const ISSUE_URL = 'https://github.com/MrPryor/auto-play/issues';
 
     const CHECK_INTERVAL_MS = 300;
     const COOLDOWN_MS = 1500;
     const SCROLL_FALLBACK_DELAY_MS = 150;
 
     const STORAGE_KEYS = {
-        enabled: 'autoPlay_enabled',
-        nextDelayMs: 'autoPlay_nextDelayMs',
-        endThresholdSeconds: 'autoPlay_endThresholdSeconds',
-        advanceNearEndEnabled: 'autoPlay_advanceNearEndEnabled',
-        hotkeyEnabled: 'autoPlay_hotkeyEnabled',
-        debugEnabled: 'autoPlay_debugEnabled',
-        panelVisible: 'autoPlay_panelVisible'
+        enabled: 'autoPlayV73_enabled',
+        nextDelayMs: 'autoPlayV73_nextDelayMs',
+        endThresholdSeconds: 'autoPlayV73_endThresholdSeconds',
+        advanceNearEndEnabled: 'autoPlayV73_advanceNearEndEnabled',
+        hotkeyEnabled: 'autoPlayV73_hotkeyEnabled',
+        debugEnabled: 'autoPlayV73_debugEnabled',
+        panelVisible: 'autoPlayV73_panelVisible'
     };
 
     const DEFAULTS = {
@@ -62,10 +65,15 @@
         { label: '2 seconds', value: 2 }
     ];
 
-    let settings = loadSettings();
-
-    let host = null;
-    let shadowRoot = null;
+    let settings = {
+        enabled: GM_getValue(STORAGE_KEYS.enabled, DEFAULTS.enabled),
+        nextDelayMs: GM_getValue(STORAGE_KEYS.nextDelayMs, DEFAULTS.nextDelayMs),
+        endThresholdSeconds: GM_getValue(STORAGE_KEYS.endThresholdSeconds, DEFAULTS.endThresholdSeconds),
+        advanceNearEndEnabled: GM_getValue(STORAGE_KEYS.advanceNearEndEnabled, DEFAULTS.advanceNearEndEnabled),
+        hotkeyEnabled: GM_getValue(STORAGE_KEYS.hotkeyEnabled, DEFAULTS.hotkeyEnabled),
+        debugEnabled: GM_getValue(STORAGE_KEYS.debugEnabled, DEFAULTS.debugEnabled),
+        panelVisible: GM_getValue(STORAGE_KEYS.panelVisible, DEFAULTS.panelVisible)
+    };
 
     let lastVideo = null;
     let lastAdvanceTime = 0;
@@ -73,16 +81,34 @@
     let lastDebugMessage = 'Loaded';
     let lastVideoTime = 'No video found';
 
-    function loadSettings() {
-        return {
-            enabled: GM_getValue(STORAGE_KEYS.enabled, DEFAULTS.enabled),
-            nextDelayMs: GM_getValue(STORAGE_KEYS.nextDelayMs, DEFAULTS.nextDelayMs),
-            endThresholdSeconds: GM_getValue(STORAGE_KEYS.endThresholdSeconds, DEFAULTS.endThresholdSeconds),
-            advanceNearEndEnabled: GM_getValue(STORAGE_KEYS.advanceNearEndEnabled, DEFAULTS.advanceNearEndEnabled),
-            hotkeyEnabled: GM_getValue(STORAGE_KEYS.hotkeyEnabled, DEFAULTS.hotkeyEnabled),
-            debugEnabled: GM_getValue(STORAGE_KEYS.debugEnabled, DEFAULTS.debugEnabled),
-            panelVisible: GM_getValue(STORAGE_KEYS.panelVisible, DEFAULTS.panelVisible)
-        };
+    let host = null;
+    let shadowRoot = null;
+
+    function isUsingDropdown() {
+        if (!shadowRoot) {
+            return false;
+        }
+
+        const activeElement = shadowRoot.activeElement;
+
+        return activeElement && activeElement.tagName === 'SELECT';
+    }
+
+    function safeRenderUI() {
+        if (isUsingDropdown()) {
+            return;
+        }
+
+        renderUI();
+    }
+
+    function log(message) {
+        lastDebugMessage = message;
+
+        if (settings.debugEnabled) {
+            console.log(`[${SCRIPT_NAME} ${SCRIPT_VERSION}] ${message}`);
+            safeRenderUI();
+        }
     }
 
     function saveSetting(key, value) {
@@ -116,36 +142,13 @@
         renderUI();
     }
 
-    function log(message) {
-        lastDebugMessage = message;
-
-        if (settings.debugEnabled) {
-            console.log(`[${SCRIPT_NAME} ${SCRIPT_VERSION}] ${message}`);
-            safeRenderUI();
-        }
-    }
-
-    function isUsingDropdown() {
-        if (!shadowRoot) {
-            return false;
-        }
-
-        return shadowRoot.activeElement?.tagName === 'SELECT';
-    }
-
-    function safeRenderUI() {
-        if (!isUsingDropdown()) {
-            renderUI();
-        }
-    }
-
     function getCurrentVideo() {
         const videos = Array.from(document.querySelectorAll('video'));
 
         return videos.find(video => !video.paused && video.offsetParent !== null) ||
-            videos.find(video => video.offsetParent !== null) ||
-            videos[0] ||
-            null;
+               videos.find(video => video.offsetParent !== null) ||
+               videos[0] ||
+               null;
     }
 
     function preventLoop(video) {
@@ -191,7 +194,7 @@
         window.dispatchEvent(keyUp);
     }
 
-    function advanceToNextShort() {
+    function scrollToNextShort() {
         const now = Date.now();
 
         if (now - lastAdvanceTime < COOLDOWN_MS) {
@@ -234,17 +237,17 @@
             pendingAdvance = false;
 
             if (settings.enabled) {
-                advanceToNextShort();
+                scrollToNextShort();
             }
         }, settings.nextDelayMs);
     }
 
-    function shouldAdvance(video, remainingSeconds) {
+    function shouldAdvance(video, remaining) {
         if (settings.advanceNearEndEnabled) {
-            return remainingSeconds <= settings.endThresholdSeconds && video.currentTime > 1;
+            return remaining <= settings.endThresholdSeconds && video.currentTime > 1;
         }
 
-        return video.ended || remainingSeconds <= 0.05;
+        return video.ended || remaining <= 0.05;
     }
 
     function checkVideo() {
@@ -266,10 +269,10 @@
             return;
         }
 
-        const remainingSeconds = video.duration - video.currentTime;
+        const remaining = video.duration - video.currentTime;
 
         lastVideoTime =
-            `Time: ${video.currentTime.toFixed(1)} / ${video.duration.toFixed(1)} | Remaining: ${remainingSeconds.toFixed(1)}s`;
+            `Time: ${video.currentTime.toFixed(1)} / ${video.duration.toFixed(1)} | Remaining: ${remaining.toFixed(1)}s`;
 
         if (!settings.enabled) {
             pendingAdvance = false;
@@ -294,7 +297,7 @@
 
         preventLoop(video);
 
-        if (shouldAdvance(video, remainingSeconds)) {
+        if (shouldAdvance(video, remaining)) {
             scheduleNextShort();
         } else if (settings.debugEnabled) {
             safeRenderUI();
@@ -307,14 +310,60 @@
     }
 
     function openDonatePage() {
-        window.open(APP.donateUrl, '_blank', 'noopener,noreferrer');
+        window.open(DONATE_URL, '_blank', 'noopener,noreferrer');
+    }
+
+    function openIssuePage() {
+        window.open(ISSUE_URL, '_blank', 'noopener,noreferrer');
+    }
+
+    function removeOldUI() {
+        const oldIds = [
+            'yt-shorts-auto-next-debug-v4-container',
+            'yt-shorts-auto-next-debug-v4-panel',
+            'yt-shorts-auto-next-debug-v4-toggle',
+            'yt-shorts-auto-next-debug-v4-version',
+            'yt-shorts-auto-next-debug-v41-container',
+            'yt-shorts-auto-next-debug-v41-panel',
+            'yt-shorts-auto-next-debug-v41-toggle',
+            'yt-shorts-auto-next-debug-v41-version',
+            'yt-shorts-auto-next-debug-v42-panel',
+            'yt-shorts-auto-next-debug-v42-badge',
+            'yt-shorts-auto-next-debug-v42-button',
+            'yt-shorts-auto-next-debug-v50-panel',
+            'yt-shorts-auto-next-debug-v50-badge',
+            'yt-shorts-auto-next-debug-v50-button',
+            'yt-shorts-auto-next-debug-v60-host',
+            'yt-shorts-auto-next-v61-host',
+            'yt-shorts-auto-next-v62-host',
+            'yt-shorts-auto-next-v63-host',
+            'yt-shorts-auto-next-v64-host',
+            'yt-shorts-auto-next-v65-host',
+            'yt-shorts-auto-next-v66-host',
+            'yt-shorts-auto-next-v67-host',
+            'auto-play-v68-host',
+            'auto-play-v69-host',
+            'auto-play-v70-host',
+            'auto-play-v71-host',
+            'auto-play-v72-host',
+            'auto-play-v73-host'
+        ];
+
+        oldIds.forEach(id => {
+            const element = document.getElementById(id);
+
+            if (element) {
+                element.remove();
+            }
+        });
     }
 
     function createHost() {
-        removeExistingHost();
+        removeOldUI();
 
         host = document.createElement('div');
-        host.id = APP.hostId;
+        host.id = 'auto-play-v73-host';
+
         host.style.position = 'fixed';
         host.style.right = '16px';
         host.style.bottom = '18px';
@@ -326,11 +375,7 @@
         shadowRoot = host.attachShadow({ mode: 'open' });
 
         renderUI();
-        log(`Script loaded version ${APP.version}`);
-    }
-
-    function removeExistingHost() {
-        document.getElementById(APP.hostId)?.remove();
+        log(`Script loaded version ${SCRIPT_VERSION}`);
     }
 
     function ensureUI() {
@@ -338,7 +383,7 @@
             return;
         }
 
-        if (!document.getElementById(APP.hostId)) {
+        if (!document.getElementById('auto-play-v73-host')) {
             createHost();
         }
     }
@@ -398,17 +443,17 @@
         return select;
     }
 
-    function addInfo(parent, text) {
-        parent.appendChild(createElement('div', 'info-line', text));
+    function addInfo(panel, text) {
+        panel.appendChild(createElement('div', 'info-line', text));
     }
 
-    function addLabel(parent, text) {
-        parent.appendChild(createElement('div', 'label', text));
+    function addLabel(panel, text) {
+        panel.appendChild(createElement('div', 'label', text));
     }
 
     function buildPanelHeader(panel) {
         const panelHeader = createElement('div', 'panel-header');
-        const title = createElement('div', 'title', APP.name);
+        const title = createElement('div', 'title', SCRIPT_NAME);
         const closeButton = createElement('button', 'close-button', '×');
 
         closeButton.type = 'button';
@@ -424,43 +469,52 @@
         panel.appendChild(panelHeader);
     }
 
-    function buildDebugSection(panel) {
+    function buildDebugInfo(panel) {
         if (!settings.debugEnabled) {
             return;
         }
 
         panel.appendChild(createElement('div', 'section-title', 'Debug Info'));
-        addInfo(panel, `Version: ${APP.version}`);
+        addInfo(panel, `Version: ${SCRIPT_VERSION}`);
         addInfo(panel, 'Author: Mr_Pryor');
         addInfo(panel, `Status: ${settings.enabled ? 'Enabled' : 'Disabled'}`);
         addInfo(panel, lastVideoTime);
         addInfo(panel, `Last message: ${lastDebugMessage}`);
     }
 
-    function buildSettingsSection(panel) {
-        panel.appendChild(createElement('div', 'section-title', 'Settings'));
-
+    function buildDelaySetting(panel) {
         addLabel(panel, 'Delay before next Short');
+
         panel.appendChild(createSelect(DELAY_OPTIONS, settings.nextDelayMs, value => {
             saveSetting('nextDelayMs', Number(value));
         }));
+    }
 
+    function buildAdvanceThresholdSetting(panel) {
         addLabel(panel, 'Advance when this close to end');
-        panel.appendChild(createSelect(
-            END_THRESHOLD_OPTIONS,
-            settings.advanceNearEndEnabled ? settings.endThresholdSeconds : 'disabled',
-            value => {
-                if (value === 'disabled') {
-                    saveSetting('advanceNearEndEnabled', false);
-                    return;
-                }
 
-                saveMultipleSettings({
-                    advanceNearEndEnabled: true,
-                    endThresholdSeconds: Number(value)
-                });
+        const selectedValue = settings.advanceNearEndEnabled
+            ? settings.endThresholdSeconds
+            : 'disabled';
+
+        panel.appendChild(createSelect(ADVANCE_THRESHOLD_OPTIONS, selectedValue, value => {
+            if (value === 'disabled') {
+                saveSetting('advanceNearEndEnabled', false);
+                return;
             }
-        ));
+
+            saveMultipleSettings({
+                advanceNearEndEnabled: true,
+                endThresholdSeconds: Number(value)
+            });
+        }));
+    }
+
+    function buildSettings(panel) {
+        panel.appendChild(createElement('div', 'section-title', 'Settings'));
+
+        buildDelaySetting(panel);
+        buildAdvanceThresholdSetting(panel);
 
         panel.appendChild(createButton(
             settings.hotkeyEnabled ? 'Hotkey N: ON' : 'Hotkey N: OFF',
@@ -487,10 +541,19 @@
         ));
     }
 
-    function buildDonateFooter(panel) {
+    function buildFooter(panel) {
         const footer = createElement('div', 'panel-footer');
-        const donateButton = createElement('button', 'donate-button', 'Donate');
 
+        const reportButton = createElement('button', 'report-button', 'Report Issue');
+        reportButton.type = 'button';
+        reportButton.title = 'Report an issue on GitHub';
+
+        reportButton.addEventListener('click', event => {
+            stopEvent(event);
+            openIssuePage();
+        });
+
+        const donateButton = createElement('button', 'donate-button', 'Donate');
         donateButton.type = 'button';
         donateButton.title = 'Donate with PayPal';
 
@@ -499,6 +562,7 @@
             openDonatePage();
         });
 
+        footer.appendChild(reportButton);
         footer.appendChild(donateButton);
         panel.appendChild(footer);
     }
@@ -587,7 +651,8 @@
             }
 
             .close-button:hover,
-            .donate-button:hover {
+            .donate-button:hover,
+            .report-button:hover {
                 background: rgba(255, 0, 51, 1);
             }
 
@@ -665,12 +730,14 @@
 
             .panel-footer {
                 display: flex;
-                justify-content: flex-end;
+                justify-content: space-between;
                 align-items: center;
+                gap: 8px;
                 margin-top: 10px;
             }
 
-            .donate-button {
+            .donate-button,
+            .report-button {
                 border: none;
                 border-radius: 999px;
                 color: white;
@@ -698,9 +765,9 @@
         const panel = createElement('div', 'panel');
 
         buildPanelHeader(panel);
-        buildDebugSection(panel);
-        buildSettingsSection(panel);
-        buildDonateFooter(panel);
+        buildDebugInfo(panel);
+        buildSettings(panel);
+        buildFooter(panel);
 
         wrapper.appendChild(panel);
         wrapper.appendChild(createMainButton());
