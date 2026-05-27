@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Auto Play
 // @namespace    http://tampermonkey.net/
-// @version      7.6
+// @version      7.9
 // @description  Automatically moves to the next YouTube Short with Shadow DOM settings UI.
 // @author       Mr_Pryor
 // @license      MIT
@@ -17,7 +17,7 @@
 (function () {
     'use strict';
 
-    const SCRIPT_VERSION = '7.6';
+    const SCRIPT_VERSION = '7.9';
     const SCRIPT_NAME = 'Auto Play';
     const DONATE_URL = 'https://www.paypal.com/donate/?hosted_button_id=552NJP5ZMFYEL';
     const ISSUE_URL = 'https://github.com/MrPryor/auto-play/issues';
@@ -40,7 +40,7 @@
         hotkeyEnabled: 'autoPlayV73_hotkeyEnabled',
         debugEnabled: 'autoPlayV73_debugEnabled',
         panelVisible: 'autoPlayV73_panelVisible',
-        monitorMoveProtectionEnabled: 'autoPlayV76_monitorMoveProtectionEnabled'
+        monitorMoveProtectionEnabled: 'autoPlayV79_monitorMoveProtectionEnabled'
     };
 
     const DEFAULTS = {
@@ -180,6 +180,19 @@
         userNavigationUntil = Date.now() + USER_NAVIGATION_GRACE_MS;
     }
 
+    function markUserNavigationAndEndResizeLock() {
+        markUserNavigation();
+
+        if (isResizeLocked()) {
+            resizeLockUntil = 0;
+            log('Monitor Move Protection released by user navigation');
+        }
+
+        setTimeout(acceptCurrentShortAfterUserNavigation, 150);
+        setTimeout(acceptCurrentShortAfterUserNavigation, 500);
+        setTimeout(acceptCurrentShortAfterUserNavigation, 1000);
+    }
+
     function markAutoPlayNavigation() {
         autoPlayNavigationUntil = Date.now() + AUTO_PLAY_NAVIGATION_GRACE_MS;
     }
@@ -188,6 +201,23 @@
         const now = Date.now();
 
         return now < userNavigationUntil || now < autoPlayNavigationUntil;
+    }
+
+    function acceptCurrentShortAfterUserNavigation() {
+        const currentUrl = getCurrentShortUrl();
+
+        if (!currentUrl) {
+            return;
+        }
+
+        lastStableShortUrl = currentUrl;
+        protectedShortUrl = currentUrl;
+        resizeLockUntil = 0;
+        lastDebugMessage = 'Accepted manual Short navigation';
+
+        if (settings.debugEnabled) {
+            safeRenderUI();
+        }
     }
 
     function isResizeLocked() {
@@ -206,12 +236,16 @@
         }
 
         if (!isResizeLocked()) {
-            protectedShortUrl = currentUrl;
-            lastStableShortUrl = currentUrl;
+            protectedShortUrl = lastStableShortUrl || currentUrl;
         }
 
         resizeLockUntil = Date.now() + RESIZE_LOCK_MS;
-        log('Monitor Move Protection active after resize');
+
+        if (!protectedShortUrl) {
+            protectedShortUrl = currentUrl;
+        }
+
+        log('Monitor Move Protection active after resize/maximize');
     }
 
     function patchHistoryMethods() {
@@ -274,10 +308,20 @@
         if (
             isResizeLocked() &&
             protectedShortUrl &&
-            currentUrl !== protectedShortUrl &&
-            !isNavigationAllowed()
+            currentUrl !== protectedShortUrl
         ) {
+            if (isNavigationAllowed()) {
+                acceptCurrentShortAfterUserNavigation();
+                return;
+            }
+
             restoreProtectedShort();
+            return;
+        }
+
+        if (isNavigationAllowed() && currentUrl !== protectedShortUrl) {
+            lastStableShortUrl = currentUrl;
+            protectedShortUrl = currentUrl;
             return;
         }
 
@@ -976,13 +1020,33 @@
             !event.altKey &&
             !event.metaKey
         ) {
-            markUserNavigation();
+            markUserNavigationAndEndResizeLock();
         }
     });
 
-    window.addEventListener('wheel', markUserNavigation, { passive: true });
-    window.addEventListener('touchstart', markUserNavigation, { passive: true });
+    window.addEventListener('wheel', markUserNavigationAndEndResizeLock, { passive: true });
+    document.addEventListener('wheel', markUserNavigationAndEndResizeLock, { passive: true, capture: true });
+
+    window.addEventListener('touchstart', markUserNavigationAndEndResizeLock, { passive: true });
+    document.addEventListener('touchstart', markUserNavigationAndEndResizeLock, { passive: true, capture: true });
+
+    window.addEventListener('pointerdown', event => {
+        if (event.pointerType === 'touch') {
+            markUserNavigationAndEndResizeLock();
+        }
+    }, { passive: true });
+
+    document.addEventListener('pointerdown', event => {
+        if (event.pointerType === 'touch') {
+            markUserNavigationAndEndResizeLock();
+        }
+    }, { passive: true, capture: true });
+
     window.addEventListener('resize', handleResize);
+
+    if (window.visualViewport) {
+        window.visualViewport.addEventListener('resize', handleResize);
+    }
     window.addEventListener('popstate', () => {
         setTimeout(checkMonitorMoveProtection, 0);
     });
