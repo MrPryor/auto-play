@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Auto Play
 // @namespace    http://tampermonkey.net/
-// @version      7.4
+// @version      7.6
 // @description  Automatically moves to the next YouTube Short with Shadow DOM settings UI.
 // @author       Mr_Pryor
 // @license      MIT
@@ -11,20 +11,26 @@
 // @match        https://youtube.com/shorts/*
 // @grant        GM_getValue
 // @grant        GM_setValue
-// @run-at       document-end
+// @run-at       document-start
 // ==/UserScript==
 
 (function () {
     'use strict';
 
-    const SCRIPT_VERSION = '7.4';
+    const SCRIPT_VERSION = '7.6';
     const SCRIPT_NAME = 'Auto Play';
     const DONATE_URL = 'https://www.paypal.com/donate/?hosted_button_id=552NJP5ZMFYEL';
     const ISSUE_URL = 'https://github.com/MrPryor/auto-play/issues';
 
     const CHECK_INTERVAL_MS = 300;
+    const PROTECTION_CHECK_INTERVAL_MS = 75;
     const COOLDOWN_MS = 1500;
     const SCROLL_FALLBACK_DELAY_MS = 150;
+
+    const RESIZE_LOCK_MS = 5000;
+    const USER_NAVIGATION_GRACE_MS = 2200;
+    const AUTO_PLAY_NAVIGATION_GRACE_MS = 4000;
+    const RESTORE_COOLDOWN_MS = 700;
 
     const STORAGE_KEYS = {
         enabled: 'autoPlayV73_enabled',
@@ -33,7 +39,8 @@
         advanceNearEndEnabled: 'autoPlayV73_advanceNearEndEnabled',
         hotkeyEnabled: 'autoPlayV73_hotkeyEnabled',
         debugEnabled: 'autoPlayV73_debugEnabled',
-        panelVisible: 'autoPlayV73_panelVisible'
+        panelVisible: 'autoPlayV73_panelVisible',
+        monitorMoveProtectionEnabled: 'autoPlayV76_monitorMoveProtectionEnabled'
     };
 
     const DEFAULTS = {
@@ -43,7 +50,8 @@
         advanceNearEndEnabled: true,
         hotkeyEnabled: true,
         debugEnabled: false,
-        panelVisible: false
+        panelVisible: false,
+        monitorMoveProtectionEnabled: true
     };
 
     const DELAY_OPTIONS = [
@@ -72,7 +80,11 @@
         advanceNearEndEnabled: GM_getValue(STORAGE_KEYS.advanceNearEndEnabled, DEFAULTS.advanceNearEndEnabled),
         hotkeyEnabled: GM_getValue(STORAGE_KEYS.hotkeyEnabled, DEFAULTS.hotkeyEnabled),
         debugEnabled: GM_getValue(STORAGE_KEYS.debugEnabled, DEFAULTS.debugEnabled),
-        panelVisible: GM_getValue(STORAGE_KEYS.panelVisible, DEFAULTS.panelVisible)
+        panelVisible: GM_getValue(STORAGE_KEYS.panelVisible, DEFAULTS.panelVisible),
+        monitorMoveProtectionEnabled: GM_getValue(
+            STORAGE_KEYS.monitorMoveProtectionEnabled,
+            DEFAULTS.monitorMoveProtectionEnabled
+        )
     };
 
     let lastVideo = null;
@@ -81,8 +93,18 @@
     let lastDebugMessage = 'Loaded';
     let lastVideoTime = 'No video found';
 
+    let lastStableShortUrl = getCurrentShortUrl();
+    let protectedShortUrl = '';
+    let resizeLockUntil = 0;
+    let userNavigationUntil = 0;
+    let autoPlayNavigationUntil = 0;
+    let restoreCooldownUntil = 0;
+    let isRestoringShort = false;
+
     let host = null;
     let shadowRoot = null;
+
+    patchHistoryMethods();
 
     function isUsingDropdown() {
         if (!shadowRoot) {
@@ -140,6 +162,129 @@
 
         lastDebugMessage = 'Settings reset';
         renderUI();
+    }
+
+    function isShortsPage() {
+        return location.pathname.startsWith('/shorts/');
+    }
+
+    function getCurrentShortUrl() {
+        if (!location.pathname.startsWith('/shorts/')) {
+            return '';
+        }
+
+        return `${location.origin}${location.pathname}`;
+    }
+
+    function markUserNavigation() {
+        userNavigationUntil = Date.now() + USER_NAVIGATION_GRACE_MS;
+    }
+
+    function markAutoPlayNavigation() {
+        autoPlayNavigationUntil = Date.now() + AUTO_PLAY_NAVIGATION_GRACE_MS;
+    }
+
+    function isNavigationAllowed() {
+        const now = Date.now();
+
+        return now < userNavigationUntil || now < autoPlayNavigationUntil;
+    }
+
+    function isResizeLocked() {
+        return Date.now() < resizeLockUntil;
+    }
+
+    function handleResize() {
+        if (!settings.monitorMoveProtectionEnabled || !isShortsPage()) {
+            return;
+        }
+
+        const currentUrl = getCurrentShortUrl();
+
+        if (!currentUrl) {
+            return;
+        }
+
+        if (!isResizeLocked()) {
+            protectedShortUrl = currentUrl;
+            lastStableShortUrl = currentUrl;
+        }
+
+        resizeLockUntil = Date.now() + RESIZE_LOCK_MS;
+        log('Monitor Move Protection active after resize');
+    }
+
+    function patchHistoryMethods() {
+        const originalPushState = history.pushState;
+        const originalReplaceState = history.replaceState;
+
+        history.pushState = function (...args) {
+            const result = originalPushState.apply(this, args);
+            setTimeout(checkMonitorMoveProtection, 0);
+            return result;
+        };
+
+        history.replaceState = function (...args) {
+            const result = originalReplaceState.apply(this, args);
+            setTimeout(checkMonitorMoveProtection, 0);
+            return result;
+        };
+    }
+
+    function restoreProtectedShort() {
+        if (!protectedShortUrl || Date.now() < restoreCooldownUntil) {
+            return;
+        }
+
+        isRestoringShort = true;
+        restoreCooldownUntil = Date.now() + RESTORE_COOLDOWN_MS;
+        lastDebugMessage = 'Restoring Short after monitor move';
+
+        history.replaceState(null, '', protectedShortUrl);
+        window.dispatchEvent(new PopStateEvent('popstate'));
+
+        setTimeout(() => {
+            if (getCurrentShortUrl() !== protectedShortUrl) {
+                location.href = protectedShortUrl;
+            }
+
+            isRestoringShort = false;
+        }, 120);
+    }
+
+    function checkMonitorMoveProtection() {
+        if (
+            !settings.monitorMoveProtectionEnabled ||
+            !isShortsPage() ||
+            isRestoringShort
+        ) {
+            return;
+        }
+
+        const currentUrl = getCurrentShortUrl();
+
+        if (!currentUrl) {
+            return;
+        }
+
+        if (!lastStableShortUrl) {
+            lastStableShortUrl = currentUrl;
+        }
+
+        if (
+            isResizeLocked() &&
+            protectedShortUrl &&
+            currentUrl !== protectedShortUrl &&
+            !isNavigationAllowed()
+        ) {
+            restoreProtectedShort();
+            return;
+        }
+
+        if (!isResizeLocked() && !isNavigationAllowed()) {
+            lastStableShortUrl = currentUrl;
+            protectedShortUrl = currentUrl;
+        }
     }
 
     function getCurrentVideo() {
@@ -202,6 +347,7 @@
         }
 
         lastAdvanceTime = now;
+        markAutoPlayNavigation();
 
         if (clickNextButton()) {
             log('Advanced using Next button');
@@ -252,6 +398,7 @@
 
     function checkVideo() {
         ensureUI();
+        checkMonitorMoveProtection();
 
         const video = getCurrentVideo();
 
@@ -346,7 +493,9 @@
             'auto-play-v70-host',
             'auto-play-v71-host',
             'auto-play-v72-host',
-            'auto-play-v73-host'
+            'auto-play-v73-host',
+            'auto-play-v75-host',
+            'auto-play-v76-host'
         ];
 
         oldIds.forEach(id => {
@@ -362,7 +511,7 @@
         removeOldUI();
 
         host = document.createElement('div');
-        host.id = 'auto-play-v73-host';
+        host.id = 'auto-play-v76-host';
 
         host.style.position = 'fixed';
         host.style.right = '16px';
@@ -383,7 +532,7 @@
             return;
         }
 
-        if (!document.getElementById('auto-play-v73-host')) {
+        if (!document.getElementById('auto-play-v76-host')) {
             createHost();
         }
     }
@@ -478,6 +627,7 @@
         addInfo(panel, `Version: ${SCRIPT_VERSION}`);
         addInfo(panel, 'Author: Mr_Pryor');
         addInfo(panel, `Status: ${settings.enabled ? 'Enabled' : 'Disabled'}`);
+        addInfo(panel, `Monitor protection: ${settings.monitorMoveProtectionEnabled ? 'Enabled' : 'Disabled'}`);
         addInfo(panel, lastVideoTime);
         addInfo(panel, `Last message: ${lastDebugMessage}`);
     }
@@ -520,6 +670,14 @@
             settings.hotkeyEnabled ? 'Hotkey N: ON' : 'Hotkey N: OFF',
             settings.hotkeyEnabled,
             () => saveSetting('hotkeyEnabled', !settings.hotkeyEnabled)
+        ));
+
+        panel.appendChild(createButton(
+            settings.monitorMoveProtectionEnabled
+                ? 'Monitor Move Protection: ON'
+                : 'Monitor Move Protection: OFF',
+            settings.monitorMoveProtectionEnabled,
+            () => saveSetting('monitorMoveProtectionEnabled', !settings.monitorMoveProtectionEnabled)
         ));
 
         panel.appendChild(createButton(
@@ -791,9 +949,11 @@
             return;
         }
 
+        const key = event.key.toLowerCase();
+
         if (
             settings.hotkeyEnabled &&
-            event.key.toLowerCase() === 'n' &&
+            key === 'n' &&
             !event.ctrlKey &&
             !event.altKey &&
             !event.metaKey
@@ -802,21 +962,45 @@
         }
 
         if (
-            event.key.toLowerCase() === 's' &&
+            key === 's' &&
             !event.ctrlKey &&
             !event.altKey &&
             !event.metaKey
         ) {
             saveSetting('panelVisible', !settings.panelVisible);
         }
+
+        if (
+            ['arrowdown', 'arrowup', 'pagedown', 'pageup', ' ', 'spacebar'].includes(key) &&
+            !event.ctrlKey &&
+            !event.altKey &&
+            !event.metaKey
+        ) {
+            markUserNavigation();
+        }
+    });
+
+    window.addEventListener('wheel', markUserNavigation, { passive: true });
+    window.addEventListener('touchstart', markUserNavigation, { passive: true });
+    window.addEventListener('resize', handleResize);
+    window.addEventListener('popstate', () => {
+        setTimeout(checkMonitorMoveProtection, 0);
     });
 
     setInterval(checkVideo, CHECK_INTERVAL_MS);
+    setInterval(checkMonitorMoveProtection, PROTECTION_CHECK_INTERVAL_MS);
     setInterval(ensureUI, 1000);
 
     window.addEventListener('yt-navigate-finish', () => {
         setTimeout(() => {
             ensureUI();
+
+            const currentUrl = getCurrentShortUrl();
+
+            if (currentUrl && !isResizeLocked() && !isNavigationAllowed()) {
+                lastStableShortUrl = currentUrl;
+                protectedShortUrl = currentUrl;
+            }
 
             const video = getCurrentVideo();
 
